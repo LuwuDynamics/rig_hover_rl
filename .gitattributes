@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+*.ogg binary
+*.eaf binary
+*.pt binary
+wn9_data binary
+wn9_index binary

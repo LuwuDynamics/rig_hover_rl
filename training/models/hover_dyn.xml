@@ -1,0 +1,62 @@
+<mujoco model="hover">
+  <!-- Hover simulation model with primitive collision geometry -->
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" integrator="implicitfast" gravity="0 0 -9.81"/>
+  <default>
+    <geom condim="3" friction="1.0 0.005 0.0001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+  </default>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.45 0.45 0.45"/>
+  </visual>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.50 0.54 0.58" rgb2="0.40 0.44 0.48" width="256" height="256"/>
+    <material name="floor" texture="grid" texrepeat="60 60" reflectance="0"/>
+    <material name="white" rgba="0.93 0.93 0.90 1" specular="0.3" shininess="0.4"/>
+    <material name="black" rgba="0.03 0.03 0.04 1" specular="0.3" shininess="0.4"/>
+    <material name="grey" rgba="0.42 0.42 0.45 1" specular="0.3" shininess="0.4"/>
+    <material name="silver" rgba="0.74 0.75 0.78 1" specular="0.3" shininess="0.4"/>
+    <material name="dark" rgba="0.13 0.13 0.15 1" specular="0.3" shininess="0.4"/>
+
+  </asset>
+  <worldbody>
+    <light pos="0.3 -0.4 1.2" dir="-0.2 0.3 -1" diffuse="0.55 0.55 0.55" castshadow="true"/>
+    <geom name="floor" type="plane" size="30 30 0.1" material="floor" contype="0" conaffinity="6" friction="0.9 0.005 0.0001"/>
+    <body name="base" pos="0 0 0.030800">
+      <freejoint name="root"/>
+      <inertial pos="-0.000117108277 -2.58543537e-07 0.00389454451" mass="0.18013738" fullinertia="8.77910274e-05 6.53527258e-05 6.03711282e-05 1.91107142e-09 1.41561905e-07 5.42506164e-08"/>
+      <geom name="base_post" type="box" pos="0 0 0.042" size="0.0094 0.0094 0.014" contype="4" conaffinity="0" group="3" rgba="0.2 0.5 0.9 0.15"/>
+      <site name="axle" pos="0 0 0" size="0.002"/>
+      
+      <body name="head" pos="0 0 0">
+        <joint name="head_yaw" type="hinge" axis="0 0 1" pos="0 0 0" range="-2.6 2.6" damping="0.0005"/>
+        <inertial pos="0.000594793898 -0.000511890522 0.0783580669" mass="0.11505262" fullinertia="5.03365173e-05 7.85508406e-05 5.81099447e-05 1.02264825e-06 -2.2496911e-06 -6.00817644e-08"/>
+        <geom name="head_box" type="box" pos="0.0023 -0.0007 0.0802" size="0.0345 0.0233 0.0358" contype="4" conaffinity="0" group="3" rgba="0.2 0.5 0.9 0.15"/>
+        <site name="imu" pos="0.01 0 0.08" size="0.002"/>
+        
+      </body>
+      <body name="wheel_l" pos="0 0.0183 0">
+        <joint name="wheel_l" type="hinge" axis="0 1 0" damping="0.002"/>
+        <inertial pos="-1.76757316e-06 0.00427843357 2.03870101e-06" mass="0.059805" fullinertia="1.71336582e-05 3.04872318e-05 1.71347066e-05 1.36177512e-10 1.44836136e-10 1.00654549e-09"/>
+        <geom name="tyre_l" type="cylinder" size="0.0308 0.004" euler="1.5707963 0 0" contype="2" conaffinity="0" group="3" rgba="0.9 0.5 0.1 0.25"/>
+        
+      </body>
+      <body name="wheel_r" pos="0 -0.0183 0">
+        <joint name="wheel_r" type="hinge" axis="0 1 0" damping="0.002"/>
+        <inertial pos="1.15061889e-07 -0.00419829572 6.76706568e-06" mass="0.059805" fullinertia="1.71231246e-05 3.04872318e-05 1.71234709e-05 5.90975358e-10 5.15757895e-10 8.21947216e-10"/>
+        <geom name="tyre_r" type="cylinder" size="0.0308 0.004" euler="1.5707963 0 0" contype="2" conaffinity="0" group="3" rgba="0.9 0.5 0.1 0.25"/>
+        
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="torque_l" joint="wheel_l" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="torque_r" joint="wheel_r" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <position name="head_servo" joint="head_yaw" kp="1.5" kv="0.03" ctrllimited="true" ctrlrange="-2.6 2.6" forcelimited="true" forcerange="-0.35 0.35"/>
+  </actuator>
+  <sensor>
+    <accelerometer name="imu_acc" site="imu"/>
+    <gyro name="imu_gyro" site="imu"/>
+  </sensor>
+</mujoco>

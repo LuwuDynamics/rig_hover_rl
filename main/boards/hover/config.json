@@ -1,0 +1,7 @@
+{
+    "target": "esp32s3",
+    "display": true,
+    "camera": true,
+    "psram": true,
+    "description": "RIG Hover two-wheel balancing robot with ESP32-S3 and a 240x240 display"
+}

@@ -1,0 +1,16 @@
+RIG Hover RL
+Derived from RIG-Omni firmware
+Copyright © 2024–2026 RIG-Omni Contributors
+
+Project-owned firmware source, training source and the trained Hover policy
+weights are distributed under the Apache License, Version 2.0.
+
+ESP-IDF and components installed from the Espressif Component Registry
+retain their own licenses. The dependency list is in main/idf_component.yml
+and the resolved versions are in dependencies.lock. Bundled third-party
+source files retain their original notices, including the GIF decoder
+license in main/display/lvgl_display/gif/LICENSE.txt.
+
+The Hover balance policy is distinct from the WakeNet speech recognition
+models. Third-party models, fonts and other third-party resources retain
+their respective terms.
