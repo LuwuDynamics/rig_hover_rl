@@ -16,7 +16,11 @@ python evaluate.py --policy weights/actor.json --scenarios stand fwd_back turn -
 
 输出按场景列出完成次数、姿态和速度误差。想训练自己的模型或验证板端推理，请看[训练与权重导出](training/README.md)。
 
-## 编译与烧录
+## 烧录预编译固件
+
+用 USB 数据线连接 RIG Hover，在浏览器中打开 [XGO 固件烧录工具](https://tools.xgorobot.com/)，选择 RIG Hover 和对应的国内版或国际版固件，按页面提示烧录。
+
+## 从源码编译与烧录
 
 硬件目标为带 16 MB Flash 和 PSRAM 的 RIG Hover（ESP32-S3）。安装 ESP-IDF 5.5.3 的 ESP32-S3 工具链，在已加载该版本 `export.sh` 的终端中，从仓库根目录运行：
 
@@ -44,7 +48,7 @@ macOS 的串口通常是 `/dev/cu.usbmodem…`，退出监视器按 `Ctrl+]`。F
 | 策略怎样接入实际控制循环 | [控制器](main/boards/hover/rl_controller.h) · [电机、状态和保护](main/boards/hover/robot.cc) |
 | 标定、轻触、动作与倾听 | [Hover 板级逻辑](main/boards/hover/hover_board.cc) · [动作播放器](main/boards/hover/gesture_player.h) |
 
-公开源码沿用 3.8.2 的平衡策略，在这个版本中精简了内部网页调参和试验采样工具。正式发布的国内、国际固件可从 [Luwu Tools 刷机中心](https://tools.luwudynamics.ai/) 获取。
+公开源码沿用 3.8.2 的平衡策略，在这个版本中精简了内部网页调参和试验采样工具。
 
 ## 许可
 
