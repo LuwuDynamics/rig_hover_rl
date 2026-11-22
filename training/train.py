@@ -101,6 +101,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument('--name', default='run')
+    ap.add_argument('--model', help='path to a MuJoCo XML model (default: bundled hover_dyn.xml)')
     ap.add_argument('--steps', type=float, default=40e6)
     ap.add_argument('--workers', type=int, default=9)
     ap.add_argument('--envs-per-worker', type=int, default=4)
@@ -173,6 +174,8 @@ def main():
     lr = args.lr
 
     env_kwargs = dict(corner_prob=args.corner_prob, push_prob=args.push_prob, config=cfg)
+    if args.model:
+        env_kwargs['model_path'] = args.model
     ctx = mp.get_context('spawn')
     conns, procs = [], []
     for w in range(args.workers):

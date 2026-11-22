@@ -2,6 +2,16 @@
 
 先按[仓库首页](../README.md)创建 Python 3.11 虚拟环境。以下命令均在 `training/` 目录运行。训练与评估使用简化碰撞几何的 MuJoCo 模型，电脑无需连接机器人。
 
+## MuJoCo 模型
+
+默认训练使用轻量的 [hover_dyn.xml](models/hover_dyn.xml)。[hover.xml](models/hover.xml) 使用相同的动力学参数，并从同目录的 `meshes/` 加载 26 个 STL 外观零件。可以直接打开查看整机：
+
+```sh
+python -m mujoco.viewer --mjcf=models/hover.xml
+```
+
+要用带外观的模型训练，在下方任一 `train.py` 命令末尾加上 `--model models/hover.xml`。训练仍在后台采样。
+
 ## 评估随附策略
 
 ```sh
