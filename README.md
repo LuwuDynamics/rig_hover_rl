@@ -1,6 +1,6 @@
 # RIG Hover RL
 
-RIG Hover 是一台双轮自平衡机器人。本仓库基于 3.8.2 固件，包含 ESP32-S3 源码、MuJoCo 动力学模型、PPO 训练代码和机器人使用的策略权重。在电脑上就能评估策略或开始训练。[English](README_EN.md)
+RIG Hover 是一台双轮自平衡机器人。本仓库基于 3.8.3 固件，包含 ESP32-S3 源码、MuJoCo 动力学模型、PPO 训练代码和机器人使用的策略权重。在电脑上就能评估策略或开始训练。[English](README_EN.md)
 
 ## 先在电脑上跑起来
 

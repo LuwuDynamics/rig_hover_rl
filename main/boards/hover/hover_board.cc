@@ -633,7 +633,7 @@ private:
             const auto state = tap_chat_state_;
             if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
                 if (state == kDeviceStateListening) {
-                    target_head_pos = 0.0f;
+                    RobotSetHeadAngle(0.0f);
                 }
                 app.HandleChatTouch(state);
                 return;
@@ -969,13 +969,13 @@ private:
             });
 
         mcp_server.AddTool("self.robot.head_angle",
-            "设置机器头部角度,角度正负45,0为中间,正为左扭头,负为右扭头",
+            "用户要求头向左或右转时调用。头部舵机角度 -75 到 75 度，正为左、负为右、0 回中。拿起或未站稳时也可转头。",
             PropertyList({
                 Property("angle", kPropertyTypeInteger, -75, 75),
             }), [this](const PropertyList& properties) -> ReturnValue {
                 int angle = properties["angle"].value<int>();
                 ESP_LOGI(TAG, "SetHeadAngle called with angle=%d", angle);
-                target_head_pos = angle;
+                if (!RobotSetHeadAngle(angle)) return std::string("正在标定，头部舵机已卸力");
                 return true;
             });
 
@@ -1012,7 +1012,7 @@ private:
             "让机器人做一个动作来表达情绪或打招呼，头、身体和屏幕表情一起动，一次大约 3 到 12 秒。name 取值："
             "hello=打招呼（转身、摇头挥手、鞠躬、再转回来），wave=挥手（只动头和鞠躬，不转身），yes=点头（同意、是），no=摇头（不同意、不是），"
             "look=东张西望（好奇），happy=开心兴奋（晃动、摇头），startle=受惊（吓一跳），shy=害羞（转开、退一点），sleepy=打瞌睡，bow=鞠躬（谢谢、再见），spin=转一圈（高兴）。"
-            "一次只能做一个；机器人没站稳、电量低、正在做别的动作时会拒绝，把原因告诉用户即可。",
+            "摇头(no)和左顾右盼(look)拿起时也能做；其他动作需站稳。电量低或动作忙时会拒绝。",
             PropertyList({
                 Property("name", kPropertyTypeString)
             }), [](const PropertyList& properties) -> ReturnValue {

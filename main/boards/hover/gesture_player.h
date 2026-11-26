@@ -12,7 +12,7 @@
 // Why not the joystick channel: the policy slews it at 0.3 m/s^2 / 4 rad/s^2, a square wave on the yaw command comes out 2-3 times too big with 5-15 cm of drift
 // (docs/INTEGRATION.md 10.17); the lean pulses and the rotate targets are what the simulator found well behaved.
 //
-// Safety: a gesture starts only after the robot has stood quietly for a moment, and it cancels itself (bias back to 0 at once, head back to rest) when the robot stops
+// Safety: a body gesture starts only after the robot has stood quietly for a moment, and it cancels itself (bias back to 0 at once, head back to rest) when the robot stops
 // balancing (a guard stop, picked up, fallen), when the lean or the wheel speed leave the range of the gestures (pushed), when the phone joystick is used,
 // when the battery is low, or on request (new move / rotate / stop command, the user, the MCP tool).
 #pragma once
@@ -26,6 +26,10 @@ enum class GestureId : int { kNone = 0, kHello, kWave, kYes, kNo, kLook, kHappy,
 enum class GestureResult : int { kOk = 0, kUnknown, kBusy, kNotBalancing, kNotQuiet, kLowBattery, kCooldown, kPending = -1 };
 
 enum class GestureCancel : int { kNone = 0, kNotBalancing, kLean, kSpeed, kJoystick, kBattery, kRequested, kUserMotion };
+
+inline bool GestureNeedsBalance(GestureId id) {
+    return id != GestureId::kNo && id != GestureId::kLook;
+}
 
 inline const char* GestureResultName(GestureResult r) {
     switch (r) {
@@ -258,10 +262,10 @@ public:
     GestureResult request(GestureId id, const GestureCtx& c) {
         if (id <= GestureId::kNone || id >= GestureId::kCount) return GestureResult::kUnknown;
         if (id_ != GestureId::kNone) return GestureResult::kBusy;
-        if (!c.balancing) return GestureResult::kNotBalancing;
+        if (GestureNeedsBalance(id) && !c.balancing) return GestureResult::kNotBalancing;
         if (c.battery_v > 0.0f && c.battery_v < cfg.start_battery_v) return GestureResult::kLowBattery;
         if (end_us_ != 0 && (float)(c.now_us - end_us_) * 1e-6f < cfg.gap_s) return GestureResult::kCooldown;
-        if (quiet_s_ < cfg.start_quiet_s) return GestureResult::kNotQuiet;
+        if (GestureNeedsBalance(id) && quiet_s_ < cfg.start_quiet_s) return GestureResult::kNotQuiet;
         id_ = id;
         start_us_ = c.now_us;
         next_ev_ = 0;
@@ -303,11 +307,13 @@ public:
         const float t = (float)(c.now_us - start_us_) * 1e-6f;
         GestureCancel why = cancel_req_;
         cancel_req_ = GestureCancel::kNone;
-        if (why == GestureCancel::kNone) {
+        if (why == GestureCancel::kNone && GestureNeedsBalance(id_)) {
             if (!c.balancing) why = GestureCancel::kNotBalancing;
             else if (fabsf(c.lean_deg) > cfg.cancel_lean_deg) why = GestureCancel::kLean;
             else if (fabsf(c.v_wheel) > cfg.cancel_v) why = GestureCancel::kSpeed;
-            else if (c.joystick) why = GestureCancel::kJoystick;
+        }
+        if (why == GestureCancel::kNone) {
+            if (c.joystick) why = GestureCancel::kJoystick;
             else if (c.battery_v > 0.0f && c.battery_v < cfg.cancel_battery_v) why = GestureCancel::kBattery;
         }
         o.id = id_;

@@ -29,7 +29,8 @@ float vx = 0.0;
 float vyaw = 0.0;
 
 float q_head=0.0;
-float target_head_pos = 0.0;
+static float target_head_pos = 0.0;
+static bool s_gesture_drives_head = false;  // explicit angles take priority until the next gesture
 
 float tor1 = 0.0;
 float tor2 = 0.0;
@@ -209,6 +210,7 @@ bool FinishServoCalibration() {
     std::lock_guard<std::mutex> lock(motor_control_mutex);
     head_zero_pos = position;
     target_head_pos = 0.0f;
+    s_gesture_drives_head = false;
     vx = 0.0f;
     vyaw = 0.0f;
     robot_state = 0;
@@ -541,6 +543,14 @@ static void GestureUserMotion() {      // a user move / rotate / stop command: w
     s_gesture_cancel_req.store((int)hover_rl::GestureCancel::kUserMotion);
 }
 
+bool RobotSetHeadAngle(float degrees) {
+    std::lock_guard<std::mutex> lock(motor_control_mutex);
+    if (calibration_active) return false;
+    target_head_pos = Clip(degrees, -75.0f, 75.0f);
+    s_gesture_drives_head = false;
+    return true;
+}
+
 static void GestureFace(int id, bool start) {
     s_gesture_face.store(0x100u | ((uint32_t)id << 1) | (start ? 1u : 0u));
 }
@@ -570,6 +580,7 @@ static float GestureStep(int64_t now_us, bool rl_balancing) {
         if (res == GestureResult::kOk) {
             s_active_gesture_face = req.face;
             s_gesture_head_rest = target_head_pos;
+            s_gesture_drives_head = true;
         }
         s_gs.last_result = (int)res;
         s_gesture_res.store((int)res);
@@ -592,16 +603,18 @@ static float GestureStep(int64_t now_us, bool rl_balancing) {
                 stable_pos = Clip(stable_pos + g.ev[i].value, wheel_x - kMoveLeadMaxM, wheel_x + kMoveLeadMaxM);
             }
         }
-        if (g.head_on) {
+        if (g.head_on && s_gesture_drives_head) {
             target_head_pos = Clip(s_gesture_head_rest + g.head_deg, -75.0f, 75.0f);
             s_gs.head_deg = g.head_deg;
+        } else {
+            s_gs.head_deg = 0.0f;
         }
         if (g.finished) {
             GestureFace(s_active_gesture_face, false);
             if (g.cancelled != GestureCancel::kNone) {
                 s_gs.cancels++;
                 s_gs.last_cancel = (int)g.cancelled;
-                if (g.cancelled != GestureCancel::kJoystick && g.cancelled != GestureCancel::kUserMotion) {
+                if (GestureNeedsBalance(g.id) && g.cancelled != GestureCancel::kJoystick && g.cancelled != GestureCancel::kUserMotion) {
                     stable_pos = wheel_x;               // drop what is left of the gesture's move / rotate targets (the joystick / the user's own command keeps its say)
                     stable_yaw = yaw - q_head;
                 }
@@ -699,7 +712,7 @@ static void RlApply() {
 
     const bool balancing = (robot_state == 1) && isIMUInit && control_mode == 0;
     if ((mode != RL_MODE_RL && mode != RL_MODE_SHADOW) || !balancing) {
-        GestureStep(now_us, false);      // a gesture in progress gives up (not balancing)
+        GestureStep(now_us, false);      // head-only gestures also run while carried
         if (mode == RL_MODE_RL) {
             // Not balancing (lying, held in a hand, lifted, after a guard stop): the position and heading targets follow the robot, so that it stands
             // where it is put down instead of walking back to where it was picked up (the wheels spin when it is lifted, wheel_x jumps, and the old
@@ -859,7 +872,7 @@ static void UpdateWheelTorque() {
     float lqr_dq = 0.0;
     update_state();
     if (control_mode == 1) {
-        GestureStep(esp_timer_get_time(), false);   // gimbal mode: no balancing, a gesture in progress gives up (car mode: RlApply steps the player)
+        GestureStep(esp_timer_get_time(), false);   // gimbal mode also supports head-only gestures
     }
 
     if (control_mode == 1) {

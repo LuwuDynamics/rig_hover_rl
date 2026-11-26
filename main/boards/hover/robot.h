@@ -35,6 +35,7 @@ void lulu_ble_on_rx_bytes(const uint8_t* data, size_t len);
 void InitializeController();
 void SetControlMode(int mode);
 bool SetGimbalPitch(float angle, bool relative);
+bool RobotSetHeadAngle(float degrees);   // absolute pan angle; returns false during servo calibration
 // 在指定时长内保持竖直平衡站姿（原地不动），用于首次联网成功后的 15 秒站稳提示
 void HoldStandStance(uint32_t duration_ms);
 
@@ -62,7 +63,6 @@ extern float gimbal_ff;
 extern float vx;
 extern float vyaw;
 extern float q_head;
-extern float target_head_pos;
 extern float dq_u_max;
 extern uint8_t isIMUInit;
 extern float imu_zero;
@@ -171,11 +171,11 @@ void RobotStopMotion();
 // ---------------------------------------------------------------------------------------------------------------
 // Gestures: scripted, emotion-like motions (nod, shake, greeting, ...) on top of the RL balance controller, see gesture_player.h.
 // The player runs inside the control loop; these calls only leave a request / read the state, so they are safe from any task.
-// A gesture only pans the head, adds a pitch bias to imu_zero (lean forward / back) and adds rotate / move targets. It starts only when the robot has stood quietly
-// for a second, and it cancels itself when the robot stops balancing, is pushed, the phone joystick is used, the battery is low, or a new move / rotate / stop comes in.
+// Head shakes and left/right looks use the head servo in any balance state. Gestures that lean, move or turn the body
+// require a quiet stand and stop on loss of balance.
 // ---------------------------------------------------------------------------------------------------------------
 extern volatile float rl_gesture_lean;     // multiplier of the lean (pitch bias) amplitude of every gesture, 0.2 .. 1.5 (debug page var RL_gesture_lean)
-extern volatile float rl_gesture_quiet_s;  // a gesture starts only after the robot stood quietly this long [s], default 1 (debug page var 39 GESTURE_quiet; 0 = no such wait)
+extern volatile float rl_gesture_quiet_s;  // time standing quietly before a body gesture can start [s]
 extern volatile float rl_head_speed;       // the speed argument of the head servo command (WriteByte_P_V, stock 1300; unit not documented: debug page var 38 HEAD_speed lets you try others, the head speed shows in /api/trace qhead_cdeg)
 int RobotGesturePlay(int id, int face_id = 0);              // GestureId (1..11); returns a GestureResult (0 = started); waits up to 0.3 s for the control loop's decision
 void RobotGestureCancel();                 // stop what is playing: the head goes back to rest, the remaining move / rotate targets are dropped
