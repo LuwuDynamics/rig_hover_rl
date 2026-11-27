@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.8.5 · 2026-11-27
+
+### 中文
+
+- 设备启动时，以及联网后唤醒或开始聊天时，会检查绑定状态。确认解绑后显示绑定二维码并保留已保存的 Wi-Fi。修正已绑定设备因 OTA 占位地址再次显示绑定页的问题。
+- 缩小 MCP 工具清单，为分页预留空间。串口日志会记录每页的工具数量、字节数和下一页游标，方便排查语音控制问题。
+- 轮毂测试工具 self.robot.motor11 和 self.robot.motor21 合并为 self.robot.motor_test，通过 id=11 或 id=21 选择电机。
+
+### English
+
+- Hover checks its binding status at startup and when a voice session starts while online. After unbinding, it shows the binding QR code and keeps the saved Wi-Fi network. A placeholder OTA URL no longer sends an already-bound device back to the binding screen.
+- The MCP tool list is smaller and leaves space for pagination. Serial logs report the tool count, byte count and next cursor for each page to help diagnose voice control issues.
+- The wheel test tools self.robot.motor11 and self.robot.motor21 have been merged into self.robot.motor_test. Pass id=11 or id=21 to select the motor.
+
 ## 3.8.4 · 2026-11-27
 
 ### 中文

@@ -132,12 +132,12 @@ esp_err_t Ota::CheckVersion() {
             activation_message_ = message->valuestring;
         }
         cJSON* code = cJSON_GetObjectItem(activation, "code");
-        if (cJSON_IsString(code)) {
+        if (cJSON_IsString(code) && code->valuestring[0]) {
             activation_code_ = code->valuestring;
             has_activation_code_ = true;
         }
         cJSON* challenge = cJSON_GetObjectItem(activation, "challenge");
-        if (cJSON_IsString(challenge)) {
+        if (cJSON_IsString(challenge) && challenge->valuestring[0]) {
             activation_challenge_ = challenge->valuestring;
             has_activation_challenge_ = true;
         }
@@ -215,6 +215,7 @@ esp_err_t Ota::CheckVersion() {
     }
 
     has_new_version_ = false;
+    firmware_url_.clear();
     cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
     if (cJSON_IsObject(firmware)) {
         cJSON *version = cJSON_GetObjectItem(firmware, "version");
@@ -222,11 +223,12 @@ esp_err_t Ota::CheckVersion() {
             firmware_version_ = version->valuestring;
         }
         cJSON *url = cJSON_GetObjectItem(firmware, "url");
-        if (cJSON_IsString(url)) {
+        // The OTA service also uses this placeholder for bound devices with no update.
+        if (cJSON_IsString(url) && !strstr(url->valuestring, "/NOT_ACTIVATED_FIRMWARE_THIS_IS_A_INVALID_URL")) {
             firmware_url_ = url->valuestring;
         }
 
-        if (cJSON_IsString(version) && cJSON_IsString(url)) {
+        if (cJSON_IsString(version) && !firmware_url_.empty()) {
             // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
             has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
             if (has_new_version_) {
@@ -244,9 +246,7 @@ esp_err_t Ota::CheckVersion() {
         ESP_LOGW(TAG, "No firmware section found!");
     }
 
-    // 服务端对尚未激活（未绑定智能体）的设备返回 NOT_ACTIVATED 占位固件地址
-    device_activated_ = firmware_url_.find("NOT_ACTIVATED") == std::string::npos;
-    if (!device_activated_) {
+    if (!IsDeviceActivated()) {
         ESP_LOGW(TAG, "Server reports device NOT activated");
     }
 
@@ -471,7 +471,26 @@ esp_err_t Ota::Activate() {
         return ESP_FAIL;
     }
 
+    int status_code = PostActivation(GetActivationPayload());
+    if (status_code == 202) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return status_code == 200 ? ESP_OK : ESP_FAIL;
+}
+
+Ota::BindingStatus Ota::CheckBindingStatus() {
+    switch (PostActivation("{}")) {
+        case 200: return BindingStatus::Bound;
+        case 202: return BindingStatus::Unbound;
+        default:  return BindingStatus::Unknown;
+    }
+}
+
+int Ota::PostActivation(std::string payload) {
     std::string url = GetCheckVersionUrl();
+    if (url.empty()) {
+        return 0;
+    }
     if (url.back() != '/') {
         url += "/activate";
     } else {
@@ -480,23 +499,11 @@ esp_err_t Ota::Activate() {
 
     auto http = SetupHttp();
 
-    std::string data = GetActivationPayload();
-    http->SetContent(std::move(data));
+    http->SetTimeout(5000);
+    http->SetContent(std::move(payload));
 
     if (!http->Open("POST", url)) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection");
-        return ESP_FAIL;
+        return 0;
     }
-    
-    auto status_code = http->GetStatusCode();
-    if (status_code == 202) {
-        return ESP_ERR_TIMEOUT;
-    }
-    if (status_code != 200) {
-        ESP_LOGE(TAG, "Failed to activate, code: %d, body: %s", status_code, http->ReadAll().c_str());
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Activation successful");
-    return ESP_OK;
+    return http->GetStatusCode();
 }

@@ -186,8 +186,6 @@ private:
     esp_timer_handle_t long_press_timer_ = nullptr;  // 长按检测定时器
     bool nvs_reset_emotion_shown_ = false;  // 鏄惁宸叉樉绀?nvs_reset 琛ㄦ儏
     bool agent_configured_ = true;          // 服务端是否已配置智能体（激活回调更新）
-    std::atomic<bool> just_provisioned_{false};
-    bool activation_required_ = false;      // 鏈嶅姟绔槸鍚﹁姹傚厛婵€娲昏澶?
 
     // 瑙︽懜闀挎寜 / 鏍囧畾妯″紡鐘舵€?
     int64_t touch_press_start_time_ = 0;
@@ -206,7 +204,6 @@ private:
 
     // 鏈嶅姟绔姹傛縺娲绘椂涓嶆竻绌洪厤缃戙€佷笉閲嶅惎锛氫繚鐣?WiFi锛岄娆¤仈缃戞彁绀烘墠鑳芥甯告挱鏀?
     virtual bool ShouldResetOnActivationRequired() override {
-        activation_required_ = true;
         return false;
     }
 
@@ -1070,9 +1067,7 @@ private:
             });
 
         mcp_server.AddTool("self.robot.set_controller",
-            "切换平衡控制器，用于对比测试。mode=rl：强化学习策略控制轮子；mode=lqr：原 LQR 控制器；"
-            "mode=shadow：LQR 控制，强化学习只在后台计算用于对比（可以安全验证符号）；"
-            "mode=rearm：清除强化学习的偏航失控锁定。",
+            "切换平衡控制器：mode=rl/lqr/shadow(LQR运行+RL后台对比)/rearm(解除保护锁定)。",
             PropertyList({
                 Property("mode", kPropertyTypeString)
             }), [](const PropertyList& properties) -> ReturnValue {
@@ -1115,36 +1110,26 @@ private:
                 return std::string("云台俯仰已设为 ") + std::to_string((int)gimbal_pitch_target) + "度";
             });
 
-        mcp_server.AddTool("self.robot.motor11",
-            "单独测试11号轮毂电机：speed为-100到100（100=最快正转，30=慢速正转，负值反转），"
-            "seconds为持续时间0-10秒（0=立即停止）。仅用于短时间测试，机器人可能失去平衡。",
+        mcp_server.AddTool("self.robot.motor_test",
+            "测试11或21号轮毂电机：id=11/21，speed=-100..100(默认30，负反转)，seconds=0..10(默认2，0停止)。",
             PropertyList({
+                Property("id", kPropertyTypeInteger, 11, 21),
                 Property("speed", kPropertyTypeInteger, 30, -100, 100),
                 Property("seconds", kPropertyTypeInteger, 2, 0, 10),
             }), [](const PropertyList& properties) -> ReturnValue {
+                int id = properties["id"].value<int>();
+                if (id != 11 && id != 21) {
+                    return std::string("仅支持11或21号电机");
+                }
                 int speed = properties["speed"].value<int>();
                 int seconds = properties["seconds"].value<int>();
-                SetWheelMotorTest(11, speed, (uint32_t)seconds * 1000);
-                return std::string("11号电机 ") + std::to_string(speed) + "%，"
-                     + std::to_string(seconds) + "秒";
-            });
-
-        mcp_server.AddTool("self.robot.motor21",
-            "单独测试21号轮毂电机：speed为-100到100（100=最快正转，30=慢速正转，负值反转），"
-            "seconds为持续时间0-10秒（0=立即停止）。仅用于短时间测试，机器人可能失去平衡。",
-            PropertyList({
-                Property("speed", kPropertyTypeInteger, 30, -100, 100),
-                Property("seconds", kPropertyTypeInteger, 2, 0, 10),
-            }), [](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed"].value<int>();
-                int seconds = properties["seconds"].value<int>();
-                SetWheelMotorTest(21, speed, (uint32_t)seconds * 1000);
-                return std::string("21号电机 ") + std::to_string(speed) + "%，"
+                SetWheelMotorTest((uint8_t)id, speed, (uint32_t)seconds * 1000);
+                return std::to_string(id) + "号电机 " + std::to_string(speed) + "%，"
                      + std::to_string(seconds) + "秒";
             });
 
         mcp_server.AddTool("self.robot.motor_stop",
-            "立即停止11号和21号电机的独立测试输出",
+            "停止11/21号电机测试",
             PropertyList(std::vector<Property>{}), [](const PropertyList& properties) -> ReturnValue {
                 SetWheelMotorTest(11, 0, 0);
                 SetWheelMotorTest(21, 0, 0);
@@ -1373,9 +1358,8 @@ public:
 
     virtual void OnAgentConfigChecked(bool agent_configured) override {
         // 鑱旂綉婵€娲诲悗鐢?Application 鍥炶皟锛氭湇鍔＄鏄惁宸茬粦瀹氭櫤鑳戒綋
-        agent_configured_ = agent_configured && !activation_required_;
-        ESP_LOGW(TAG, "Agent config checked: configured=%d activation_required=%d",
-                 agent_configured_ ? 1 : 0, activation_required_ ? 1 : 0);
+        agent_configured_ = agent_configured;
+        ESP_LOGW(TAG, "Agent config checked: configured=%d", agent_configured);
     }
 
     virtual void OnInitializationComplete() override {

@@ -40,13 +40,14 @@ MqttProtocol::~MqttProtocol() {
     // Mark as dead first to prevent any pending scheduled tasks from executing
     *alive_ = false;
     
+    // Stopping MQTT can still run its disconnect callback, which uses the timer.
+    udp_.reset();
+    mqtt_.reset();
+
     if (reconnect_timer_ != nullptr) {
         esp_timer_stop(reconnect_timer_);
         esp_timer_delete(reconnect_timer_);
     }
-
-    udp_.reset();
-    mqtt_.reset();
     
     if (event_group_handle_ != nullptr) {
         vEventGroupDelete(event_group_handle_);

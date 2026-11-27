@@ -14,6 +14,8 @@ public:
 
     esp_err_t CheckVersion();
     esp_err_t Activate();
+    enum class BindingStatus { Unknown, Bound, Unbound };
+    BindingStatus CheckBindingStatus();
     bool HasActivationChallenge() { return has_activation_challenge_; }
     bool HasNewVersion() { return has_new_version_; }
     bool HasMqttConfig() { return has_mqtt_config_; }
@@ -21,7 +23,7 @@ public:
     bool HasActivationCode() { return has_activation_code_; }
     bool HasServerTime() { return has_server_time_; }
     // 服务端认为设备已经激活（已绑定账号/智能体）时为 true
-    bool IsDeviceActivated() { return device_activated_; }
+    bool IsDeviceActivated() const { return !has_activation_code_ && !has_activation_challenge_; }
     bool StartUpgrade(std::function<void(int progress, size_t speed)> callback);
     static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback);
     void MarkCurrentVersionValid();
@@ -43,7 +45,6 @@ private:
     bool has_activation_code_ = false;
     bool has_serial_number_ = false;
     bool has_activation_challenge_ = false;
-    bool device_activated_ = true;
     std::string current_version_;
     std::string firmware_version_;
     std::string firmware_url_;
@@ -54,6 +55,7 @@ private:
     std::function<void(int progress, size_t speed)> upgrade_callback_;
     std::vector<int> ParseVersion(const std::string& version);
     bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
+    int PostActivation(std::string payload);
     std::string GetActivationPayload();
     std::unique_ptr<Http> SetupHttp();
 };

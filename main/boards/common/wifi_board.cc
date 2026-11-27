@@ -179,13 +179,20 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 }
 
 #if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+void WifiBoard::StartBindingMode() {
+    // Give BluFi ownership of the station, keeping the saved WiFi credentials.
+    esp_timer_stop(connect_timer_);
+    WifiManager::GetInstance().StopStation();
+    StartWifiConfigMode(true);
+}
+
 void WifiBoard::ReconnectAfterProvisioning() {
     reconnecting_after_provisioning_ = true;
     TryWifiConnect();
 }
 #endif
 
-void WifiBoard::StartWifiConfigMode() {
+void WifiBoard::StartWifiConfigMode(bool binding_required) {
 #if CONFIG_BOARD_TYPE_HOVER
     reconnecting_after_provisioning_ = false;
 #endif
@@ -215,13 +222,20 @@ void WifiBoard::StartWifiConfigMode() {
     // initialize esp-blufi protocol
     blufi.init();
     // 显示 WiFi 配网表情并播放语音提示
-    Application::GetInstance().Schedule([]() {
+    Application::GetInstance().Schedule([binding_required]() {
         auto display = Board::GetInstance().GetDisplay();
         if (display && strcmp(display->GetEmotion(), "wificonfig") != 0) {
             display->SetEmotion("wificonfig");
         }
 #if CONFIG_BOARD_TYPE_TARS
         Application::GetInstance().PlaySound(Lang::Sounds::OGG_TARS_WIFICONFIG());
+#elif CONFIG_BOARD_TYPE_HOVER
+#if CONFIG_FIRMWARE_REGION_OVERSEAS
+        auto prompt = binding_required ? Lang::Sounds::OGG_ACTIVATION_EN_US() : Lang::Sounds::OGG_WIFICONFIG_EN_US();
+#else
+        auto prompt = binding_required ? Lang::Sounds::OGG_ACTIVATION_ZH_CN() : Lang::Sounds::OGG_WIFICONFIG_ZH_CN();
+#endif
+        Application::GetInstance().PlaySound(prompt);
 #else
         Application::GetInstance().PlaySound(Lang::Sounds::OGG_WIFICONFIG());
 #endif

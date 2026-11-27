@@ -13,6 +13,7 @@ protected:
     bool in_config_mode_ = false;
 #if CONFIG_BOARD_TYPE_HOVER
     std::atomic<bool> reconnecting_after_provisioning_{false};
+    std::atomic<bool> just_provisioned_{false};
 #endif
     NetworkEventCallback network_event_callback_ = nullptr;
 
@@ -33,7 +34,7 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void StartWifiConfigMode();
+    void StartWifiConfigMode(bool binding_required = false);
 
     /**
      * WiFi connection timeout callback
@@ -66,6 +67,8 @@ public:
 
 #if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     void ReconnectAfterProvisioning();
+    void StartBindingMode();
+    bool WasJustProvisioned() const { return just_provisioned_.load(); }
 #endif
     
     /**

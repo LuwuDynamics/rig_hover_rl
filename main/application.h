@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 
 #include <atomic>
+#include <optional>
 #include <string>
 #include <mutex>
 #include <deque>
@@ -159,6 +160,10 @@ private:
     bool aborted_ = false;
 #if CONFIG_BOARD_TYPE_HOVER
     std::atomic<bool> finishing_tts_playback_{false};
+#if CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    void EnterBindingMode();
+    bool ShowBindingPageIfUnbound();
+#endif
 #endif
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
@@ -175,8 +180,7 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
-    void ContinueOpenAudioChannel(ListeningMode mode);
-    void ContinueWakeWordInvoke(const std::string& wake_word);
+    void StartChatSession(ListeningMode mode, std::optional<std::string> wake_word = std::nullopt);
 
     // Activation task (runs in background)
     void ActivationTask();

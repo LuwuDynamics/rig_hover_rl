@@ -587,12 +587,16 @@ void McpServer::ReplyError(int id, const std::string& message) {
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
+    // Reserve space for the outer MQTT/JSON-RPC envelope and nextCursor suffix so the
+    // serialized transport message stays within 8000 bytes.
     const int max_payload_size = 8000;
+    const int envelope_reserve = 180;
     std::string json = "{\"tools\":[";
     
     bool found_cursor = cursor.empty();
     auto it = tools_.begin();
     std::string next_cursor = "";
+    int tool_count = 0;
     
     while (it != tools_.end()) {
         // 如果我们还没有找到起始位置，继续搜索
@@ -612,13 +616,14 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         
         // 添加tool前检查大小
         std::string tool_json = (*it)->to_json() + ",";
-        if (json.length() + tool_json.length() + 30 > max_payload_size) {
+        if (json.length() + tool_json.length() + envelope_reserve > max_payload_size) {
             // 如果添加这个tool会超出大小限制，设置next_cursor并退出循环
             next_cursor = (*it)->name();
             break;
         }
         
         json += tool_json;
+        tool_count++;
         ++it;
     }
     
@@ -639,6 +644,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
     
+    ESP_LOGW(TAG, "tools/list: count=%d bytes=%u next=%s", tool_count, (unsigned)json.length(), next_cursor.c_str());
     ReplyResult(id, json);
 }
 

@@ -1,5 +1,9 @@
 #include "application.h"
 #include "board.h"
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#include "wifi_board.h"
+#include <wifi_manager.h>
+#endif
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
@@ -229,7 +233,7 @@ void Application::Run() {
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
-        if (bits & MAIN_EVENT_ERROR) {
+        if ((bits & MAIN_EVENT_ERROR) && GetDeviceState() != kDeviceStateWifiConfiguring) {
             SetDeviceState(kDeviceStateIdle);
             Alert(Lang::Strings::ERROR(), last_error_message_.c_str(), "circle_xmark", BOARD_SOUND(EXCLAMATION, EXCLAMATION));
         }
@@ -345,6 +349,13 @@ void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (!ota_->IsDeviceActivated()) {
+        ota_.reset();
+        EnterBindingMode();
+        return;
+    }
+#endif
     SetDeviceState(kDeviceStateIdle);
 
     has_server_time_ = ota_->HasServerTime();
@@ -373,6 +384,36 @@ void Application::HandleActivationDoneEvent() {
     });
 }
 
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+void Application::EnterBindingMode() {
+    auto& board = static_cast<WifiBoard&>(Board::GetInstance());
+    board.OnAgentConfigChecked(false);
+    auto state = GetDeviceState();
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+        SetDeviceState(kDeviceStateIdle);
+    }
+    if (!SetDeviceState(kDeviceStateWifiConfiguring)) {
+        return;
+    }
+    ESP_LOGW(TAG, "Device unbound, opening binding QR and BluFi");
+    board.GetDisplay()->SetEmotion("wificonfig");
+    ResetProtocolSync();
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    audio_service_.ResetDecoder();
+    board.StartBindingMode();
+}
+
+bool Application::ShowBindingPageIfUnbound() {
+    if (WifiManager::GetInstance().IsConnected() &&
+        Ota().CheckBindingStatus() == Ota::BindingStatus::Unbound) {
+        EnterBindingMode();
+        return true;
+    }
+    return false;
+}
+#endif
+
 void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
@@ -383,8 +424,25 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
-    // Initialize the protocol
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    // The phone may still be finishing the bind request after provisioning WiFi.
+    auto& board = static_cast<WifiBoard&>(Board::GetInstance());
+    if (!ota_->IsDeviceActivated() && board.WasJustProvisioned()) {
+        Schedule([]() { Board::GetInstance().GetDisplay()->SetEmotion("wificonfig"); });
+        for (int i = 0; i < 3; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            if (ota_->CheckBindingStatus() == Ota::BindingStatus::Bound) {
+                CheckNewVersion();  // Fetch the bound device's protocol credentials.
+                break;
+            }
+        }
+    }
+    if (ota_->IsDeviceActivated()) {
+        InitializeProtocol();
+    }
+#else
     InitializeProtocol();
+#endif
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
@@ -529,7 +587,7 @@ void Application::CheckNewVersion() {
             }
         }
 
-        if (ota_->HasNewVersion()) {
+        if (ota_->HasNewVersion() && ota_->IsDeviceActivated()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
                 return; // This line will never be reached after reboot
             }
@@ -584,6 +642,9 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(GetUserPowerSaveLevel());
         Schedule([this]() {
+            if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+                return;
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -652,7 +713,9 @@ void Application::InitializeProtocol() {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
+                    if (Application::GetInstance().GetDeviceState() != kDeviceStateWifiConfiguring) {
+                        display->SetEmotion(emotion_str.c_str());
+                    }
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -801,16 +864,7 @@ void Application::HandleToggleChatEvent() {
     }
 
     if (state == kDeviceStateIdle) {
-        ListeningMode mode = GetDefaultListeningMode();
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode]() {
-                ContinueOpenAudioChannel(mode);
-            });
-            return;
-        }
-        SetListeningMode(mode);
+        StartChatSession(GetDefaultListeningMode());
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
@@ -818,19 +872,34 @@ void Application::HandleToggleChatEvent() {
     }
 }
 
-void Application::ContinueOpenAudioChannel(ListeningMode mode) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+void Application::StartChatSession(ListeningMode mode, std::optional<std::string> wake_word) {
+    if (!SetDeviceState(kDeviceStateConnecting)) {
         return;
     }
-
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+    Schedule([this, mode, wake_word = std::move(wake_word)]() {
+        if (GetDeviceState() != kDeviceStateConnecting || !protocol_) {
             return;
         }
-    }
-
-    SetListeningMode(mode);
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        if (ShowBindingPageIfUnbound()) {
+            return;
+        }
+#endif
+        if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateIdle);
+            return;
+        }
+        if (wake_word) {
+#if CONFIG_SEND_WAKE_WORD_DATA
+            while (auto packet = audio_service_.PopWakeWordPacket()) {
+                protocol_->SendAudio(std::move(packet));
+            }
+            protocol_->SendWakeWordDetected(*wake_word);
+#endif
+            play_popup_on_listening_ = true;
+        }
+        SetListeningMode(mode);
+    });
 }
 
 void Application::HandleStartListeningEvent() {
@@ -849,15 +918,7 @@ void Application::HandleStartListeningEvent() {
     }
     
     if (state == kDeviceStateIdle) {
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop);
-            });
-            return;
-        }
-        SetListeningMode(kListeningModeManualStop);
+        StartChatSession(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
         SetListeningMode(kListeningModeManualStop);
@@ -887,20 +948,13 @@ void Application::HandleWakeWordDetectedEvent() {
 
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
-
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update),
-            // then continue with OpenAudioChannel which may block for ~1 second
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
+        StartChatSession(GetDefaultListeningMode(), wake_word);
+    } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+#if CONFIG_BOARD_TYPE_HOVER && CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        if (ShowBindingPageIfUnbound()) {
             return;
         }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
-    } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+#endif
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
         while (audio_service_.PopPacketFromSendQueue());
@@ -920,39 +974,6 @@ void Application::HandleWakeWordDetectedEvent() {
         // Restart the activation check if the wake word is detected during activation
         SetDeviceState(kDeviceStateIdle);
     }
-}
-
-void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
-        return;
-    }
-
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
-            audio_service_.EnableWakeWordDetection(true);
-            return;
-        }
-    }
-
-    ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
-    while (auto packet = audio_service_.PopWakeWordPacket()) {
-        protocol_->SendAudio(std::move(packet));
-    }
-    // Set the chat state to wake word detected
-    protocol_->SendWakeWordDetected(wake_word);
-
-    // Set flag to play popup sound after state changes to listening
-    play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
-#else
-    // Set flag to play popup sound after state changes to listening
-    // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
-    play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
-#endif
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1169,16 +1190,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
 
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
-            return;
-        }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
+        StartChatSession(GetDefaultListeningMode(), wake_word);
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
