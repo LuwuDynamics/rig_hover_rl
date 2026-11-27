@@ -13,7 +13,6 @@
 #include <freertos/semphr.h>
 #include <esp_log.h>
 #include <esp_flash.h>
-#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 #include "robot_action.h"
@@ -23,6 +22,7 @@
 #include "settings.h"
 #include "rl_controller.h"
 #include "gesture_player.h"
+#include "head_imu_comp.h"
 
 float ctrl_vx = 0.0;
 float stable_vx = 0.0;
@@ -31,6 +31,10 @@ float vyaw = 0.0;
 
 float q_head=0.0;
 static float target_head_pos = 0.0;
+static float s_head_cmd_deg = 0.0f;
+static bool s_head_cmd_init = false;
+static int64_t s_head_cmd_us = 0;
+static bool s_head_slewing = false;
 static bool s_gesture_drives_head = false;  // explicit angles take priority until the next gesture
 
 float tor1 = 0.0;
@@ -213,6 +217,9 @@ bool FinishServoCalibration() {
     std::lock_guard<std::mutex> lock(motor_control_mutex);
     head_zero_pos = position;
     target_head_pos = 0.0f;
+    s_head_cmd_deg = 0.0f;
+    s_head_cmd_init = true;
+    s_head_slewing = false;
     s_gesture_drives_head = false;
     vx = 0.0f;
     vyaw = 0.0f;
@@ -478,6 +485,13 @@ volatile float rl_assist_gain = kRlDefaults.assist_gain;
 volatile float rl_wheel_max = kRlDefaults.wheel_runaway_ms;
 
 static hover_rl::RlController s_rl;
+static hover_rl::HeadMountEstimator s_head_mount;
+static hover_rl::GyroBiasEstimator s_gyro_bias;
+static bool s_head_mount_logged = false;
+static float s_head_mount_log_p = hover_rl::kDefaultHeadMountPitchDeg;
+static float s_head_mount_log_r = hover_rl::kDefaultHeadMountRollDeg;
+static float s_gyro_bias_log[3] = {0.0f, 0.0f, 0.0f};
+static float s_gyro_prev_q_head = 0.0f;
 static RlStatus s_rl_status = {};
 static portMUX_TYPE s_rl_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_rl_rearm_request = false;
@@ -737,6 +751,8 @@ static void RlApply(const ImuAttitude& sample) {
         }
         if (s_rl_status.active) xSemaphoreTake(stand_event, 0);
         s_rl.reset();       // keep the estimators clean: the next start is a fresh start
+        s_head_mount.resetQuiet();
+        s_gyro_bias.resetQuiet();
         s_rl_prev_mode = mode;
         RlPublish(st);
         return;
@@ -787,6 +803,7 @@ static void RlApply(const ImuAttitude& sample) {
     sig.stable_yaw_deg = stable_yaw;
     sig.joy_vx = vx;
     sig.joy_vyaw = vyaw;
+    sig.head_moving = s_head_slewing || (s_gs.active && fabsf(s_gs.head_deg) > 0.5f);
     const hover_rl::Output o = s_rl.step(sig);
     s_gesture_v = o.v_wheel;
     s_rl_cycles++;
@@ -812,6 +829,48 @@ static void RlApply(const ImuAttitude& sample) {
     if (!quiet) quiet_since_us = 0;
     else if (!quiet_since_us || now_us - last_observed_us > 50000 || o.stood) quiet_since_us = now_us;
     last_observed_us = now_us;
+
+    const bool mount_quiet = mode == RL_MODE_RL && o.run && !o.stop && !o.latched && o.ramp >= 1.0f &&
+        !s_gs.active && fabsf(sig.q_head_deg) < 15.0f && sig.joy_vx == 0 && sig.joy_vyaw == 0 &&
+        fabsf(o.v_cmd) < 0.025f && fabsf(o.r_cmd) < 0.12f && fabsf(o.v_wheel) < 0.06f &&
+        fabsf(sig.dq_dps) < 20.0f && fabsf(sig.yaw_rate_dps) < 20.0f;
+    if (s_head_mount.update(st.dt_ms * 1e-3f, mount_quiet, sample.raw_acc_x, sample.raw_acc_y, sample.raw_acc_z)) {
+        const float mp = s_head_mount.pitchDeg();
+        const float mr = s_head_mount.rollDeg();
+        imu_set_head_mount_deg(mp, mr);
+        if ((!s_head_mount_logged && s_head_mount.learnedSeconds() >= 1.0f) ||
+            (s_head_mount_logged && (fabsf(mp - s_head_mount_log_p) >= 0.5f || fabsf(mr - s_head_mount_log_r) >= 0.5f))) {
+            s_head_mount_logged = true;
+            s_head_mount_log_p = mp;
+            s_head_mount_log_r = mr;
+            ESP_LOGW("ROBOT_RL", "head IMU mount tilt: pitch %.2f deg, roll %.2f deg", (double)mp, (double)mr);
+        }
+    }
+
+    if (!s_gyro_bias.seeded() && isIMUInit) {
+        float boot_gb[3] = {0.0f, 0.0f, 0.0f};
+        imu_get_gyro_bias(boot_gb);
+        s_gyro_bias.seed(boot_gb[0], boot_gb[2]);
+        s_gyro_bias_log[0] = boot_gb[0];
+        s_gyro_bias_log[2] = boot_gb[2];
+        s_gyro_prev_q_head = sig.q_head_deg;
+    }
+    const bool head_still_for_bias = !s_head_slewing && fabsf(sig.q_head_deg - s_gyro_prev_q_head) < 0.35f;
+    s_gyro_prev_q_head = sig.q_head_deg;
+    const bool gyro_quiet = mode == RL_MODE_RL && o.run && !o.stop && !o.latched && o.ramp >= 1.0f &&
+        !s_gs.active && head_still_for_bias && sig.joy_vx == 0 && sig.joy_vyaw == 0 &&
+        fabsf(o.v_cmd) < 0.025f && fabsf(o.r_cmd) < 0.05f && fabsf(o.v_wheel) < 0.03f &&
+        fabsf(sig.dq_dps) < 20.0f && fabsf(sig.yaw_rate_dps) < 20.0f;
+    if (s_gyro_bias.seeded() &&
+        s_gyro_bias.update(st.dt_ms * 1e-3f, gyro_quiet, sample.raw_gyro_x, sample.raw_gyro_z)) {
+        const float bx = s_gyro_bias.bx(), bz = s_gyro_bias.bz();
+        imu_set_gyro_rp_bias(bx, bz);
+        if (fabsf(bx - s_gyro_bias_log[0]) >= 0.5f || fabsf(bz - s_gyro_bias_log[2]) >= 0.5f) {
+            s_gyro_bias_log[0] = bx;
+            s_gyro_bias_log[2] = bz;
+            ESP_LOGW("ROBOT_RL", "online gyro rp bias: gx=%.2f gz=%.2f dps", (double)bx, (double)bz);
+        }
+    }
     st.quiet_since_us = quiet_since_us;
     st.measured_pitch_deg = sig.pitch_deg;
     st.active = 1;
@@ -950,8 +1009,8 @@ static void UpdateWheelTorque() {
         {
             // 离散 LQR 全状态反馈: u = -K·x, Ts≈6ms (robot_control 周期)
             // x1 位置误差(m)  x2 速度误差(m/s)  x3 俯仰误差(deg)  x4 俯仰角速度(deg/s)
-            // pitch_ref = imu_zero·cos(head) 补偿头部姿态对平衡角的影响
-            const float pitch_ref = imu_zero * cosf(q_head * PI / 180.0f);
+            // imu.cc 已在头部系内扣除三维安装倾角后再按 q_head 投影到机身系，pitch_ref 直接取 imu_zero
+            const float pitch_ref = imu_zero;
             lqr_x  = wheel_x - stable_pos;
             lqr_vx = wheek_vx - vx;
             lqr_q  = pitch - pitch_ref;
@@ -989,9 +1048,29 @@ void robot_control() {
         std::lock_guard<std::mutex> lock(motor_control_mutex);
         if (calibration_active) {
             EnableServo(3, 0);
+            s_head_cmd_init = false;
+            s_head_slewing = false;
         } else {
+            const int64_t now_us = esp_timer_get_time();
+            const float dt_head = (s_head_cmd_us > 0) ? Clip((float)(now_us - s_head_cmd_us) * 1e-6f, 0.001f, 0.05f) : 0.006f;
+            s_head_cmd_us = now_us;
+            if (!s_head_cmd_init) {
+                s_head_cmd_deg = target_head_pos;
+                s_head_cmd_init = true;
+            }
+            const float head_err = target_head_pos - s_head_cmd_deg;
+            if (robot_state == 1 && control_mode == 0 && !s_gs.active) {
+                // Smooth head pan while balancing (~90 deg/s) to cut off-axis centripetal/reaction disturbances.
+                constexpr float kBalanceHeadSlewDps = 90.0f;
+                const float max_step = kBalanceHeadSlewDps * dt_head;
+                s_head_cmd_deg += Clip(head_err, -max_step, max_step);
+                s_head_slewing = fabsf(head_err) > 0.25f;
+            } else {
+                s_head_slewing = fabsf(head_err) > 0.5f;
+                s_head_cmd_deg = target_head_pos;
+            }
             UpdateWheelTorque();
-            WriteByte_P_V(3, short(head_zero_pos - target_head_pos*10.0), (short)rl_head_speed);
+            WriteByte_P_V(3, short(head_zero_pos - s_head_cmd_deg * 10.0f), (short)rl_head_speed);
         }
     }
     vTaskDelay(pdMS_TO_TICKS(2));

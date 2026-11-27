@@ -27,8 +27,17 @@ struct ImuAttitude {
     int64_t continuous_since_us;
     float pitch, roll, yaw;
     float pitch_rate_dps, yaw_rate_dps;
+    float raw_acc_x, raw_acc_y, raw_acc_z;
+    float raw_gyro_x, raw_gyro_y, raw_gyro_z;
 };
 ImuAttitude imu_get_attitude();
+
+// Update the head-frame IMU mounting tilt compensation (degrees, clamped internally).
+void imu_set_head_mount_deg(float pitch_deg, float roll_deg);
+
+// Update online roll/pitch gyro zero biases [deg/s] (gyro_x, gyro_z); yaw bias stays from boot calibration.
+void imu_set_gyro_rp_bias(float bx, float bz);
+void imu_get_gyro_bias(float bias_dps[3]);
 
 // Hover only (RL controller): gyro yaw rate in deg/s, zero-bias compensated, positive in the direction in which `yaw` increases.
 float imu_yaw_rate_dps();

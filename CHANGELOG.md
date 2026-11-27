@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.8.6 · 2026-11-27
+
+### 中文
+
+- 平衡时，普通转头指令以最高 90°/秒平滑执行。转头期间及结束后的 0.35 秒内，RL 控制器按 36.6 mm 轮距和左右轮速差估算机身转速，减少头部运动对平衡控制的干扰。
+- 姿态计算补偿头部 IMU 的安装倾角。机器人安静站稳后会逐步校正安装倾角和俯仰、横滚陀螺仪零偏。
+- 开机时重新初始化 IMU，优先同步读取加速度和角速度。同步模式不可用时，改用数据就绪标志读取新样本。
+
+### English
+
+- While balancing, Hover executes ordinary head turns at up to 90°/s. During a turn and for 0.35 seconds afterward, the RL controller uses the difference in wheel speeds and the 36.6 mm wheel track to estimate body yaw rate and reduce interference from head motion.
+- Attitude estimation now accounts for the head IMU mounting angle. Once Hover is balancing quietly, it gradually refines the mounting angle and the pitch and roll gyroscope biases.
+- At startup, Hover reinitializes the IMU and tries synchronized accelerometer and gyroscope reads. If synchronized sampling is unavailable, it uses the data-ready flags to read fresh samples.
+
 ## 3.8.5 · 2026-11-27
 
 ### 中文

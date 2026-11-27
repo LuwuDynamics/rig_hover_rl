@@ -1,6 +1,6 @@
 # RIG Hover RL
 
-ESP32-S3 firmware and a MuJoCo/PyTorch training environment for the RIG Hover two-wheel balancing robot, based on firmware 3.8.5. The repository includes the deployed policy as JSON, a PyTorch checkpoint for fine-tuning, and the C++ weights used by the firmware. [中文](README.md)
+ESP32-S3 firmware and a MuJoCo/PyTorch training environment for the RIG Hover two-wheel balancing robot, based on firmware 3.8.6. The repository includes the deployed policy as JSON, a PyTorch checkpoint for fine-tuning, and the C++ weights used by the firmware. [中文](README.md)
 
 [Changelog](CHANGELOG.md)
 

@@ -71,6 +71,7 @@ struct Signals {
     float stable_yaw_deg = 0;      // robot.cc: stable_yaw（偏航目标，度，与 yaw - q_head 比较）
     float joy_vx = 0;              // 摇杆（±100，0 表示没用摇杆）：非零时覆盖位置/角度外环
     float joy_vyaw = 0;            // 正 = 左转
+    bool head_moving = false;      // 头部舵机正在转动（斜坡/动作中）：此时策略改用轮子差分偏航角速度，避免头部自转污染观测
 };
 
 struct Output {
@@ -183,11 +184,14 @@ class RlController {
 public:
     Config cfg;
     static constexpr float kTyreRadiusM = 0.0308f;            // STEP：轮胎外径 61.6 mm
+    static constexpr float kWheelTrackM = 0.0366f;            // 左右轮胎接地点中心距（hover.xml：2 × 18.3 mm）
     static constexpr float kMetersPerCount = kTyreRadiusM * 6.2831853f / 1024.0f;
     static constexpr float kDegToRad = 0.017453293f;
     static constexpr float kWheelStaleS = 0.15f;
     static constexpr float kWheelCountJump = 500.0f;          // 一个轮子状态帧之间超过这么多个计数当作错帧丢掉（真机约 39 ms 一帧，500 个计数 = 2.4 m/s；原来的 300 在 1.45 m/s 以上就冻结了速度估计）
     static constexpr float kGapS = 0.04f;
+    static constexpr float kHeadMotionHoldS = 0.35f;          // 头部停止转动后继续用轮速偏航角速度的尾窗（覆盖舵机减速与读数延迟）
+    static constexpr float kHeadMoveDeltaDeg = 0.8f;          // q_head 读数跳变阈值：覆盖未设 head_moving 的手势/外部转头
 
     // 机器人不在平衡状态（或不使用 RL）时每个周期调用，让下一次起步是干净的
     void reset() {
@@ -211,6 +215,9 @@ public:
         cl_ = 0.0f;
         stood_ = false;
         stand_since_us_ = 0;
+        q_head_seen_ = false;
+        prev_q_head_deg_ = 0.0f;
+        head_motion_hold_s_ = 0.0f;
     }
 
     // 清除偏航失控锁定
@@ -272,14 +279,27 @@ public:
         if (test_v_override == test_v_override) v_wheel = test_v_override;   // 仿真桥专用：用仿真器自己的轮速做对照
 #endif
 
-        // ---- 姿态：与现有 LQR 相同的零位（imu_zero * cos(头部角)）
-        const float pitch_ref = s.imu_zero_deg * cosf(s.q_head_deg * kDegToRad);
+        // ---- 姿态：imu.cc 已在头部系内扣除三维安装倾角后再按 q_head 投影到机身系，
+        //      因此 pitch 与 q_head 无关，imu_zero（及动作倾角偏置）直接作为机身俯仰零位。
+        const float pitch_ref = s.imu_zero_deg;
         const float pitch_rel_deg = s.pitch_deg - pitch_ref;
 
-        // ---- 偏航角速度：陀螺装在头上，直接用原始读数。训练时就是这样（头部随机转动是训练扰动之一，
-        //      用 q_head 差分去补偿会引入 38 ms 的陈旧数据，仿真里反而更糟）。不在这里限幅：策略自己会把观测限到 ±5（缩放后），
-        //      保护要看到真实的角速度
+        // ---- 偏航角速度：陀螺装在头上，机身转动时直接用原始读数；头部舵机转动期间
+        //      （head_moving 或 q_head 跳变后的短尾窗内）策略改用双轮编码器差分推算的机身偏航角速度，
+        //      避免 ±150~200°/s 的头转速度打爆差模力矩和 er_int 积分。偏航失控保护仍看原始陀螺。
         const float yaw_rate = s.yaw_rate_dps * kDegToRad;
+        if (s.head_moving || (q_head_seen_ && fabsf(s.q_head_deg - prev_q_head_deg_) > kHeadMoveDeltaDeg)) {
+            head_motion_hold_s_ = kHeadMotionHoldS;
+        } else {
+            head_motion_hold_s_ = fmaxf(0.0f, head_motion_hold_s_ - dt);
+        }
+        prev_q_head_deg_ = s.q_head_deg;
+        q_head_seen_ = true;
+        const float v_left = cfg.wheel1_is_left ? v1_f_ : v2_f_;
+        const float v_right = cfg.wheel1_is_left ? v2_f_ : v1_f_;
+        const float policy_yaw_rate = (head_motion_hold_s_ > 0.0f)
+            ? ((v_right - v_left) / kWheelTrackM)
+            : yaw_rate;
 
         // 轮子位置的低通（顶住检测用）
         if (!x_lpf_init_ || cfg.stall_lpf_s <= 0.0f) {
@@ -378,7 +398,7 @@ public:
         }
 
         // ---- 策略
-        Inputs in{pitch_rel_deg * kDegToRad, s.dq_dps * kDegToRad, yaw_rate, v_wheel, v_cmd, r_cmd, dt};
+        Inputs in{pitch_rel_deg * kDegToRad, s.dq_dps * kDegToRad, policy_yaw_rate, v_wheel, v_cmd, r_cmd, dt};
         Outputs pol = policy_.step(in);
         if (cfg.diff_cap > 0.0f) {
             // 差模（右 - 左）/2 决定偏航加速度：限制它的幅度，让轮子从静摩擦里“挣脱”时不至于一下子转得太猛
@@ -507,6 +527,9 @@ private:
         w2_us_ = s.wheel2_us;
         w1_seen_ = (s.wheel1_us != 0);
         w2_seen_ = (s.wheel2_us != 0);
+        prev_q_head_deg_ = s.q_head_deg;
+        q_head_seen_ = true;
+        head_motion_hold_s_ = 0.0f;
     }
 
     static void updateWheel(float counts, int64_t us, float& prev_cnt, int64_t& prev_us, bool& seen, float& vf, float alpha) {
@@ -584,6 +607,9 @@ private:
     int64_t last_runaway_us_ = 0;
     bool latched_ = false;
     bool follow_ = false;
+    bool q_head_seen_ = false;
+    float prev_q_head_deg_ = 0.0f;
+    float head_motion_hold_s_ = 0.0f;
 };
 
 }  // namespace hover_rl
