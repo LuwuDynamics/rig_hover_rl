@@ -60,12 +60,9 @@ namespace {
     };
 
     // 站稳后播放一声约 0.36 s 的木琴提示音，国内和海外版共用。由 sim/tools/make_stand_cue.py 合成。
-    extern const char stand_ok_ogg_start[] asm("_binary_stand_ok_ogg_start");
-    extern const char stand_ok_ogg_end[] asm("_binary_stand_ok_ogg_end");
-    static const std::string_view STAND_OK_SOUND {
-        static_cast<const char*>(stand_ok_ogg_start),
-        static_cast<size_t>(stand_ok_ogg_end - stand_ok_ogg_start)
-    };
+    static_assert(AUDIO_OUTPUT_SAMPLE_RATE == 16000);
+    extern const uint8_t stand_ok_pcm_start[] asm("_binary_stand_ok_pcm_start");
+    extern const uint8_t stand_ok_pcm_end[] asm("_binary_stand_ok_pcm_end");
 
 #if CONFIG_FIRMWARE_REGION_OVERSEAS
     extern const char low_battery_ogg_start[] asm("_binary_hover_low_battery_en_ogg_start");
@@ -621,6 +618,11 @@ private:
         }
     }
 
+    bool IsWifiConfigPage() const {
+        return Application::GetInstance().GetDeviceState() == kDeviceStateWifiConfiguring ||
+               strcmp(display_->GetEmotion(), "wificonfig") == 0;
+    }
+
     void OnTapTimer() {
         const int taps = touch_tap_count_;
         touch_tap_count_ = 0;
@@ -629,8 +631,8 @@ private:
         }
 
         auto& app = Application::GetInstance();
+        const auto state = tap_chat_state_;
         if (taps == 1) {
-            const auto state = tap_chat_state_;
             if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
                 if (state == kDeviceStateListening) {
                     RobotSetHeadAngle(0.0f);
@@ -639,20 +641,27 @@ private:
                 return;
             }
 
-            if (state == kDeviceStateIdle) {
-                touch_listen_requested_.store(true);
-                return;
-            }
-            app.Schedule([]() {
+            app.Schedule([this, state]() {
+                const bool motion_only = state == kDeviceStateWifiConfiguring || IsWifiConfigPage();
+                if (state == kDeviceStateIdle && !motion_only) {
+                    touch_listen_requested_.store(true);
+                    return;
+                }
                 RobotGesturePlay(static_cast<int>(hover_rl::GestureId::kNo),
-                                 static_cast<int>(hover_rl::GestureId::kShy));
+                                 motion_only ? kGestureMotionOnly : static_cast<int>(hover_rl::GestureId::kShy));
+                if (!motion_only) {
+                    Application::GetInstance().PlaySound(STARTUP_SOUND);
+                }
             });
-            app.PlaySound(STARTUP_SOUND);
         } else if (taps >= 2) {
-            app.PlaySound(THROTTLE_SOUND);
+            app.Schedule([this, state]() {
+                if (state != kDeviceStateWifiConfiguring && !IsWifiConfigPage()) {
+                    Application::GetInstance().PlaySound(THROTTLE_SOUND);
+                }
+            });
             stable_yaw += 360.0f;
             yaw_ctrl_time = esp_timer_get_time() / 1000.0;
-            ESP_LOGI(TAG, "Double tap: spin 360° + throttle sound");
+            ESP_LOGI(TAG, "Double tap: spin 360°");
         }
     }
 
@@ -1189,7 +1198,15 @@ private:
         auto& audio = app.GetAudioService();
         LowBatteryReminder battery_reminder;
         while (true) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            bool played_stand_cue = false;
+            if (audio.IsRunning()) {
+                if (RobotWaitForStandEvent(100)) {
+                    audio.PlayPcmCue({stand_ok_pcm_start, stand_ok_pcm_end});
+                    played_stand_cue = true;
+                }
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
             const auto sample = GetBatteryVoltageSample();
             const int64_t now_us = esp_timer_get_time();
             {
@@ -1205,6 +1222,9 @@ private:
             if (RobotTakeGestureFace(&face_id, &face_start) && !calibration_mode_ && !touch_long_press_active_) {
                 const char* emotion = hover_rl::GestureInfoOf((hover_rl::GestureId)face_id).emotion;
                 Application::GetInstance().Schedule([this, emotion, face_start]() {
+                    if (IsWifiConfigPage()) {
+                        return;
+                    }
                     if (face_start) {
                         display_->SetEmotion(emotion);
                     } else if (strcmp(display_->GetEmotion(), emotion) == 0) {
@@ -1218,11 +1238,8 @@ private:
                 continue;
             }
 
-            if (RobotTakeStandEvent()) {
-                app.PlaySound(STAND_OK_SOUND);
-                ESP_LOGI(TAG, "Stand-up prompt");
-            } else if (warn_battery && !calibration_mode_ && !touch_long_press_active_ &&
-                       app.GetDeviceState() == kDeviceStateIdle && audio.IsIdle()) {
+            if (!played_stand_cue && warn_battery && !calibration_mode_ && !touch_long_press_active_ &&
+                app.GetDeviceState() == kDeviceStateIdle && audio.IsIdle()) {
                 battery_reminder.MarkPlayed();
                 app.PlaySound(LOW_BATTERY_SOUND);
                 ESP_LOGW(TAG, "Low battery reminder: %.1f V", sample.volts);
@@ -1317,13 +1334,12 @@ public:
             return base_json;
         }
 
-        imu_read_once();
-
+        const auto sample = imu_get_attitude();
         cJSON* imu = cJSON_CreateObject();
         cJSON_AddBoolToObject(imu, "initialized", imu_is_initialized());
-        cJSON_AddNumberToObject(imu, "roll", roll);
-        cJSON_AddNumberToObject(imu, "pitch", pitch);
-        cJSON_AddNumberToObject(imu, "yaw", yaw);
+        cJSON_AddNumberToObject(imu, "roll", sample.roll);
+        cJSON_AddNumberToObject(imu, "pitch", sample.pitch);
+        cJSON_AddNumberToObject(imu, "yaw", sample.yaw);
         cJSON_AddItemToObject(root, "imu", imu);
 
         char* json_str = cJSON_PrintUnformatted(root);

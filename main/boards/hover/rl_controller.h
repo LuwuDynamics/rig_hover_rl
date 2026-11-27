@@ -79,7 +79,7 @@ struct Output {
     bool latched = false;          // 偏航失控连续出现，已锁定输出 0，需要 rearm()
     bool cancel_move = false;      // true：受阻，固件应把 stable_pos 设成当前位置（放弃移动），航向目标不动
     bool gave_up = false;          // 只在做出“放弃”决定的那个周期为 true（计数/日志用）
-    bool stood = false;            // 只在“站稳了”的那个周期为 true（每次起步一次）：起步斜坡结束后连续 stand_ok_s 秒保持稳定，固件据此播放“可以松手了”
+    bool stood = false;            // 只在“站稳了”的那个周期为 true（每次起步一次）：起步后连续 stand_ok_s 秒稳定且已完成力矩接管，固件据此播放“可以松手了”
     bool reanchor = false;         // true：摇杆在用（或刚松开、指令还没衰减完），固件应把 stable_pos/stable_yaw 设成当前位置/航向，松手后原地停住而不是弹回
     Guard guard = Guard::kNone;
     float ramp = 0;                // 0..1：起步 0.25 s 内策略输出的放开比例（run == false 时为 0）。固件可以按 ramp 与原控制器平滑切换
@@ -146,12 +146,12 @@ struct Config {
     float assist_start_deg = 35.0f;
     float assist_gain = 20.0f;         // [指令单位 / 度]
     float assist_tau_s = 0.1f;
-    // 站稳提示：起步斜坡结束后，机器人连续 stand_ok_s 秒保持稳定（|俯仰| < stand_ok_pitch_deg、|俯仰角速度| < stand_ok_dq_dps、|轮速| < stand_ok_v、|偏航角速度| < stand_ok_yaw_dps），
+    // 站稳提示：起步时同步检查机器人是否连续 stand_ok_s 秒保持稳定（|俯仰| < stand_ok_pitch_deg、|俯仰角速度| < stand_ok_dq_dps、|轮速| < stand_ok_v、|偏航角速度| < stand_ok_yaw_dps），
     // Output::stood 在那一个周期为 true；每次起步只触发一次（reset() 之后才会再触发）。手扶着站稳也算——这正是要告诉用户“可以松手了”的时刻。
     // 阈值按真机的“慢晃”状态定（机器人在晃，但是站得住）：长测里慢晃时 0.6 s 窗口内的最大值中位数 / p99 是 |俯仰| 1.35 / 2.9°、|俯仰角速度| 8.3 / 22°/s、|轮速| 0.023 / 0.052 m/s、|偏航角速度| 9.6 / 16.6°/s，
     // 这组阈值让 97–98% 的慢晃窗口算“稳”（安静状态 100%），所以不会等到完全安静（刚站起来的头半分钟有时在慢晃）才响；手在晃 / 机器人在倒时这些量远大于阈值。
     bool stand_ok_enable = true;
-    float stand_ok_s = 0.6f;
+    float stand_ok_s = 0.25f;          // 默认与力矩接管并行；动作仍不稳时从下一次稳定起重新计时。
     float stand_ok_pitch_deg = 8.0f;   // 不用太小：有的机器人（质心偏）站着的时候俯仰本来就离 imu_zero 有几度，策略自己会补偿
     float stand_ok_dq_dps = 20.0f;
     float stand_ok_v = 0.08f;          // [m/s]
@@ -210,7 +210,7 @@ public:
         settle_calm_t_ = 0.0f;
         cl_ = 0.0f;
         stood_ = false;
-        stand_t_ = 0.0f;
+        stand_since_us_ = 0;
     }
 
     // 清除偏航失控锁定
@@ -240,6 +240,7 @@ public:
             o.guard = s.imu_ok ? Guard::kNumeric : Guard::kImu;
             o.stop = (o.guard == Guard::kNumeric);
             have_last_ = false;
+            stand_since_us_ = 0;
             return o;
         }
         // ---- 时间
@@ -261,6 +262,7 @@ public:
         updateWheel(s.wheel2_counts, s.wheel2_us, w2_cnt_, w2_us_, w2_seen_, v2_f_, cfg.wheel_alpha);
         if (!w1_seen_ || !w2_seen_ || (float)(s.now_us - s.wheel1_us) * 1e-6f > kWheelStaleS ||
             (float)(s.now_us - s.wheel2_us) * 1e-6f > kWheelStaleS) {
+            stand_since_us_ = 0;
             o.guard = Guard::kWheelStale;
             o.stop = started_us_ != 0;  // 刚起步时轮子还没刷新过，只是不输出
             return o;
@@ -409,6 +411,7 @@ public:
         o.r_cmd = policy_.yawRateCommand();
         if (!fin(o.left) || !fin(o.right)) {
             o.left = o.right = 0.0f;
+            stand_since_us_ = 0;
             o.guard = Guard::kNumeric;
             o.stop = true;
             return o;
@@ -427,6 +430,7 @@ public:
         t_lift_ = (cfg.lift_v > 0.0f && fabsf(v_wheel) > cfg.lift_v && fabsf(pitch_rel_deg) < cfg.lift_pitch_deg && fabsf(s.dq_dps) < cfg.lift_dq_dps) ? t_lift_ + dt : 0.0f;
         if (t_lift_ > cfg.lift_s) g = Guard::kLifted;
         if (g != Guard::kNone) {
+            stand_since_us_ = 0;
             o.guard = g;
             o.stop = true;
             o.left = o.right = 0.0f;
@@ -440,12 +444,16 @@ public:
             return o;
         }
 
-        // ---- 站稳了？（起步斜坡结束后连续 stand_ok_s 秒稳定；每次起步一次）
-        if (cfg.stand_ok_enable && !stood_) {
-            const bool steady = ramp >= 1.0f && fabsf(pitch_rel_deg) < cfg.stand_ok_pitch_deg && fabsf(s.dq_dps) < cfg.stand_ok_dq_dps &&
-                                fabsf(v_wheel) < cfg.stand_ok_v && fabsf(s.yaw_rate_dps) < cfg.stand_ok_yaw_dps;
-            stand_t_ = steady ? stand_t_ + dt : 0.0f;
-            if (stand_t_ >= cfg.stand_ok_s) {
+        // Count stable observations during the torque handover. The cue is due only
+        // once the controller has both a continuous stable window and full authority.
+        const bool steady = cfg.stand_ok_enable && fabsf(pitch_rel_deg) < cfg.stand_ok_pitch_deg &&
+            fabsf(s.dq_dps) < cfg.stand_ok_dq_dps && fabsf(v_wheel) < cfg.stand_ok_v &&
+            fabsf(s.yaw_rate_dps) < cfg.stand_ok_yaw_dps;
+        if (!steady) {
+            stand_since_us_ = 0;
+        } else if (!stood_) {
+            if (!stand_since_us_) stand_since_us_ = s.now_us;
+            if (ramp >= 1.0f && s.now_us - stand_since_us_ >= cfg.stand_ok_s * 1e6f) {
                 stood_ = true;
                 o.stood = true;
             }
@@ -490,6 +498,7 @@ private:
     }
 
     void seed(const Signals& s) {
+        stand_since_us_ = 0;
         have_last_ = true;
         last_us_ = s.now_us;
         w1_cnt_ = s.wheel1_counts;
@@ -556,7 +565,7 @@ private:
     float ring_dt_acc_ = 0.0f;
     float cl_ = 0.0f;              // 补偿的输入（共模力矩需求的慢部分）
     bool stood_ = false;           // 这次起步已经报过“站稳了”
-    float stand_t_ = 0.0f;         // 已经连续稳定了多久 [s]
+    int64_t stand_since_us_ = 0;   // 首个连续稳定样本的时间。
     int64_t settle_until_us_ = 0;  // 停止命令之后位置目标跟着机器人走，直到这个时刻（0 = 不在这个状态）
     float settle_calm_t_ = 0.0f;   // 已经稳住了多久
     float block_dir_ = 0.0f;       // 碰壁后被挡住的方向（+1 前 / −1 后 / 0 没有）

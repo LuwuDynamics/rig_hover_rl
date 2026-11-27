@@ -120,6 +120,9 @@ macro(rig_board dir name bin_name)
 endmacro()
 
 rig_board("hover" "RIG-Hover" "rig-hover")
+# The stand cue is mixed at the speaker's native rate, including during Wi-Fi prompts.
+list(REMOVE_ITEM BOARD_EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/boards/hover/stand_ok.ogg")
+list(APPEND BOARD_EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/boards/hover/stand_ok.pcm")
 
 # 根据板型命名输出文件
 set(CMAKE_PROJECT_NAME "${PROJECT_BIN_NAME}" CACHE STRING "" FORCE)

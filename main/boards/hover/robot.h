@@ -163,7 +163,7 @@ typedef struct {
 } RobotUnloadInfo;
 void RobotGetUnloadInfo(RobotUnloadInfo* out);
 
-bool RobotTakeStandEvent();   // true once after each stand-up that became steady (and only if rl_stand_sound is on): the board plays the "you can let go" prompt
+bool RobotWaitForStandEvent(uint32_t timeout_ms);  // Wait for a standing cue or the next periodic prompt-task update.
 void RobotAddMove(float meters);
 void RobotAddRotate(float degrees);
 void RobotStopMotion();
@@ -177,6 +177,8 @@ void RobotStopMotion();
 extern volatile float rl_gesture_lean;     // multiplier of the lean (pitch bias) amplitude of every gesture, 0.2 .. 1.5 (debug page var RL_gesture_lean)
 extern volatile float rl_gesture_quiet_s;  // time standing quietly before a body gesture can start [s]
 extern volatile float rl_head_speed;       // the speed argument of the head servo command (WriteByte_P_V, stock 1300; unit not documented: debug page var 38 HEAD_speed lets you try others, the head speed shows in /api/trace qhead_cdeg)
+// A zero face_id uses the gesture's own expression. Motion-only gestures emit no display events.
+constexpr int kGestureMotionOnly = -1;
 int RobotGesturePlay(int id, int face_id = 0);              // GestureId (1..11); returns a GestureResult (0 = started); waits up to 0.3 s for the control loop's decision
 void RobotGestureCancel();                 // stop what is playing: the head goes back to rest, the remaining move / rotate targets are dropped
 bool RobotTakeGestureFace(int* id, bool* start);   // for the board: true once per start / end of a gesture, to show / clear its emotion on the screen

@@ -19,6 +19,17 @@ extern float pit_gyro;
 extern float dq;
 
 #if defined(CONFIG_BOARD_TYPE_HOVER)
+// Samples normally arrive every few milliseconds. The RL control loop also treats
+// a gap longer than 40 ms as a discontinuity.
+inline constexpr int64_t kImuMaxGapUs = 40000;
+struct ImuAttitude {
+    int64_t sample_us;
+    int64_t continuous_since_us;
+    float pitch, roll, yaw;
+    float pitch_rate_dps, yaw_rate_dps;
+};
+ImuAttitude imu_get_attitude();
+
 // Hover only (RL controller): gyro yaw rate in deg/s, zero-bias compensated, positive in the direction in which `yaw` increases.
 float imu_yaw_rate_dps();
 #endif

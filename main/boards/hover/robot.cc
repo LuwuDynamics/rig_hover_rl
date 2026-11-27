@@ -10,6 +10,7 @@
 #include <driver/uart.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <esp_log.h>
 #include <esp_flash.h>
 #include <esp_heap_caps.h>
@@ -129,6 +130,8 @@ volatile int64_t motor21_test_until_us = 0;
 // 首次成功联网后的保持站姿窗口（由 OnWifiConnected 触发）
 static int64_t stand_hold_until_us = 0;
 static bool stand_hold_reported = false;
+static StaticSemaphore_t stand_event_storage;
+static SemaphoreHandle_t stand_event;
 
 void HoldStandStance(uint32_t duration_ms) {
     std::lock_guard<std::mutex> lock(motor_control_mutex);
@@ -260,6 +263,7 @@ void SetWheelMotorTest(uint8_t id, int speed_percent, uint32_t duration_ms) {
 }
 
 void InitializeController(){
+    stand_event = xSemaphoreCreateBinaryStatic(&stand_event_storage);
     pid_pos.fpKp = 60.0;
     pid_pos.fpKi = 0.0;
     pid_pos.fpKd = 0.0;
@@ -336,7 +340,9 @@ void RobotStopMotion() {
     RlClearBlock();              // the next press of "forward" is not refused because the last one hit something
 }
 
-void update_state(){
+static void update_state(const ImuAttitude& sample) {
+    static int64_t previous_sample_us = 0;
+    const float pitch = sample.pitch, roll = sample.roll, yaw = sample.yaw;
     const int state_before = robot_state;
     const char* unload_why = "other";
     wheel_x = (wheel1_x+wheel2_x)/2.0/1024.0*3.1415*0.06;
@@ -373,30 +379,36 @@ void update_state(){
     const bool upright_pose = (fabsf(pitch - (rl_start ? imu_zero : 0.0f)) < upright_tol_deg && fabsf(roll) < upright_tol_deg);
     const int64_t now_us = esp_timer_get_time();
 
-    // 开机默认倒地：IMU 校准完成前 pitch/roll 保持 0，不能据此进入平衡，
-    // 否则倾斜开机校准一结束就会按大误差猛推轮子。
-    if (!isIMUInit) {
+    // A recovered stream can arrive between two control ticks. Its new start
+    // timestamp invalidates the old upright interval even in that case.
+    const bool fresh = sample.sample_us != 0 && now_us - sample.sample_us <= kImuMaxGapUs;
+    const bool imu_interrupted = !fresh || previous_sample_us < sample.continuous_since_us;
+    if (imu_interrupted) {
         robot_state = 0;
         unload_why = "imu";
+    }
+    if (imu_interrupted || sample.sample_us - previous_sample_us > kImuMaxGapUs) {
         fall_since_us = 0;
         upright_since_us = 0;
-    } else if (fallen_pose) {
+    }
+    previous_sample_us = sample.sample_us;
+    if (fresh && fallen_pose) {
         if (fall_since_us == 0) {
-            fall_since_us = now_us;
+            fall_since_us = sample.sample_us;
         }
         upright_since_us = 0;
-        if (now_us - fall_since_us >= kFallHoldUs) {
+        if (sample.sample_us - fall_since_us >= kFallHoldUs) {
             robot_state = 0;
             unload_why = "fall_pose";
         }
-    } else {
+    } else if (fresh) {
         fall_since_us = 0;
 
         if (upright_pose) {
             if (upright_since_us == 0) {
-                upright_since_us = now_us;
+                upright_since_us = sample.sample_us;
             }
-            if (now_us - upright_since_us >= kStandHoldUs) {
+            if (sample.sample_us - upright_since_us >= kStandHoldUs) {
                 robot_state = 1;
             }
         } else {
@@ -409,8 +421,7 @@ void update_state(){
         if (now_us >= stand_hold_until_us) {
             stand_hold_until_us = 0;
             ESP_LOGW("ROBOT", "stand hold finished");
-        } else if (isIMUInit && !fallen_pose && upright_pose) {
-            robot_state = 1;
+        } else if (robot_state == 1 && upright_pose) {
             vx = 0.0f;
             vyaw = 0.0f;
             if (!stand_hold_reported) {
@@ -425,6 +436,7 @@ void update_state(){
         pick_up_count++;
         if(pick_up_count > 8){
             robot_state = 0;
+            upright_since_us = 0;
             unload_why = "pick_up";
         }
     }else{
@@ -478,7 +490,6 @@ static int s_rl_prev_mode = RL_MODE_LQR;
 static bool s_rl_prev_latched = false;
 static unsigned s_rl_stalls = 0;
 static unsigned s_rl_stands = 0;
-static std::atomic<bool> s_rl_stand_pending{false};   // set by robot_task when the robot stood up and is steady, consumed by RobotTakeStandEvent()
 
 static void RlClearBlock() {
     s_rl.clearBlock();
@@ -490,8 +501,8 @@ void RlGetStatus(RlStatus* out) {
     portEXIT_CRITICAL(&s_rl_mux);
 }
 
-bool RobotTakeStandEvent() {
-    return s_rl_stand_pending.exchange(false);
+bool RobotWaitForStandEvent(uint32_t timeout_ms) {
+    return xSemaphoreTake(stand_event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void RlRearm() {
@@ -552,6 +563,9 @@ bool RobotSetHeadAngle(float degrees) {
 }
 
 static void GestureFace(int id, bool start) {
+    if (id == kGestureMotionOnly) {
+        return;
+    }
     s_gesture_face.store(0x100u | ((uint32_t)id << 1) | (start ? 1u : 0u));
 }
 
@@ -643,7 +657,7 @@ static float GestureStep(int64_t now_us, bool rl_balancing) {
 
 int RobotGesturePlay(int id, int face_id) {
     const int count = static_cast<int>(hover_rl::GestureId::kCount);
-    if (id <= 0 || id >= count || face_id < 0 || face_id >= count) {
+    if (id <= 0 || id >= count || face_id < kGestureMotionOnly || face_id >= count) {
         return static_cast<int>(hover_rl::GestureResult::kUnknown);
     }
     std::lock_guard<std::mutex> lock(s_gesture_call_mutex);
@@ -681,7 +695,7 @@ void RobotGetGestureStatus(RobotGestureStatus* out) {
 }
 
 // Called once per control cycle right after the LQR has computed tor1/tor2 (robot_state is already evaluated).
-static void RlApply() {
+static void RlApply(const ImuAttitude& sample) {
     const int64_t now_us = esp_timer_get_time();
     if (s_rl_rearm_request) {
         s_rl_rearm_request = false;
@@ -721,6 +735,7 @@ static void RlApply() {
             stable_yaw = yaw - q_head;
             yaw_ctrl_time = 0.0f;
         }
+        if (s_rl_status.active) xSemaphoreTake(stand_event, 0);
         s_rl.reset();       // keep the estimators clean: the next start is a fresh start
         s_rl_prev_mode = mode;
         RlPublish(st);
@@ -757,10 +772,10 @@ static void RlApply() {
     hover_rl::Signals sig;
     sig.now_us = now_us;
     sig.imu_ok = true;
-    sig.pitch_deg = pitch;
-    sig.dq_dps = dq;
-    sig.yaw_rate_dps = imu_yaw_rate_dps();
-    sig.yaw_deg = yaw;
+    sig.pitch_deg = sample.pitch;
+    sig.dq_dps = sample.pitch_rate_dps;
+    sig.yaw_rate_dps = sample.yaw_rate_dps;
+    sig.yaw_deg = sample.yaw;
     sig.q_head_deg = q_head;
     sig.imu_zero_deg = imu_zero + gesture_bias;
     sig.wheel1_counts = w1x;
@@ -785,7 +800,7 @@ static void RlApply() {
     if (o.stood) {
         s_rl_stands++;
         st.stands = s_rl_stands;
-        s_rl_stand_pending.store(true);
+        xSemaphoreGive(stand_event);
         ESP_LOGI("ROBOT_RL", "standing: steady for a moment after the start (pitch %.1f deg, speed %.3f m/s)", o.pitch_rad * 57.29578f, o.v_wheel);
     }
     static int64_t quiet_since_us = 0;
@@ -842,6 +857,7 @@ static void RlApply() {
             stable_pos = wheel_x;
         }
         if (o.stop) {
+            xSemaphoreTake(stand_event, 0);
             s_rl_stops++;
             NoteUnload(hover_rl::GuardName(o.guard), o.v_wheel, s_rl_status.out_tor1, s_rl_status.out_tor2);
             robot_state = 0;         // motors off; the robot has to stand upright for 1.5 s again before it restarts
@@ -870,7 +886,9 @@ static void UpdateWheelTorque() {
     float lqr_vx = 0.0;
     float lqr_q = 0.0;
     float lqr_dq = 0.0;
-    update_state();
+    const auto sample = imu_get_attitude();
+    const float pitch = sample.pitch, dq = sample.pitch_rate_dps, yaw = sample.yaw;
+    update_state(sample);
     if (control_mode == 1) {
         GestureStep(esp_timer_get_time(), false);   // gimbal mode also supports head-only gestures
     }
@@ -961,7 +979,7 @@ static void UpdateWheelTorque() {
             tor1 = -temp_u + yaw_u;
             tor2 = temp_u + yaw_u;
         }
-        RlApply();   // hover_rl: replaces tor1/tor2 in mode 1, only observes them in mode 2
+        RlApply(sample);   // hover_rl: replaces tor1/tor2 in mode 1, only observes them in mode 2
     }
 }
 

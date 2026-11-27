@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <algorithm>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
     (esp_ae_rate_cvt_cfg_t)                                  \
@@ -210,6 +211,7 @@ void AudioService::Stop() {
     audio_encode_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
+    cue_pcm_ = {};
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
 }
@@ -323,13 +325,33 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        audio_queue_cv_.wait(lock, [this]() {
+            return !audio_playback_queue_.empty() || !cue_pcm_.empty() || service_stopped_;
+        });
         if (service_stopped_) {
             break;
         }
 
-        auto task = std::move(audio_playback_queue_.front());
-        audio_playback_queue_.pop_front();
+        std::unique_ptr<AudioTask> task;
+        if (!audio_playback_queue_.empty()) {
+            task = std::move(audio_playback_queue_.front());
+            audio_playback_queue_.pop_front();
+            const size_t count = std::min(task->pcm.size(), cue_pcm_.size() / sizeof(int16_t));
+            for (size_t i = 0; i < count; ++i) {
+                int16_t cue;
+                std::memcpy(&cue, cue_pcm_.data() + i * sizeof(cue), sizeof(cue));
+                const int mixed = task->pcm[i] + cue;
+                task->pcm[i] = std::clamp(mixed, -32768, 32767);
+            }
+            cue_pcm_ = cue_pcm_.subspan(count * sizeof(int16_t));
+        } else {
+            const size_t frame_samples = codec_->output_sample_rate() * OPUS_FRAME_DURATION_MS / 1000;
+            const auto frame = cue_pcm_.first(std::min(frame_samples * sizeof(int16_t), cue_pcm_.size()));
+            task = std::make_unique<AudioTask>();
+            task->pcm.resize(frame.size() / sizeof(int16_t));
+            std::memcpy(task->pcm.data(), frame.data(), frame.size());
+            cue_pcm_ = cue_pcm_.subspan(frame.size());
+        }
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -684,15 +706,23 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     demuxer->Process(buf, size);
 }
 
+void AudioService::PlayPcmCue(std::span<const uint8_t> pcm) {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (!service_stopped_ && !pcm.empty() && pcm.size() % sizeof(int16_t) == 0) {
+        cue_pcm_ = pcm;
+        audio_queue_cv_.notify_all();
+    }
+}
+
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
+    return cue_pcm_.empty() && audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
 }
 
 void AudioService::WaitForPlaybackQueueEmpty() {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     audio_queue_cv_.wait(lock, [this]() { 
-        return service_stopped_ || (audio_decode_queue_.empty() && audio_playback_queue_.empty()); 
+        return service_stopped_ || (cue_pcm_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty());
     });
 }
 

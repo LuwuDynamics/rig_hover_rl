@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <span>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -133,6 +134,8 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // Mix a flash-resident, 16-bit little-endian mono cue at the codec output rate.
+    void PlayPcmCue(std::span<const uint8_t> pcm);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -182,6 +185,7 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    std::span<const uint8_t> cue_pcm_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 

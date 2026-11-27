@@ -59,12 +59,22 @@ static uint16_t qmi_countInit = 0;
 
 // 与 QMI8658C.cpp 文件内变量对齐（本文件内 static，避免与工程其它翻译单元冲突）
 static double qmi_d_imu_time = 0;
-static long qmi_last_imu_time = 0;
+static int64_t qmi_last_imu_time = 0;
 static float pit_g = 0.0f;
 static float gyro_yaw = 0.0f;
 
 
 #if defined(CONFIG_BOARD_TYPE_HOVER)
+static portMUX_TYPE attitude_mux = portMUX_INITIALIZER_UNLOCKED;
+static ImuAttitude attitude{};
+
+ImuAttitude imu_get_attitude() {
+    portENTER_CRITICAL(&attitude_mux);
+    const ImuAttitude sample = attitude;
+    portEXIT_CRITICAL(&attitude_mux);
+    return sample;
+}
+
 // Hover only: the same filtered gyro channel that is integrated into `yaw` below (yaw = yaw - rate * dt), so the sign
 // convention is "positive = yaw increasing". The bias is only valid once the start-up calibration has finished (isIMUInit).
 float imu_yaw_rate_dps() {
@@ -244,14 +254,18 @@ void imu_init() {
 
     vTaskDelay(pdMS_TO_TICKS(50));
 
+#if defined(CONFIG_BOARD_TYPE_HOVER)
+    qmi_last_imu_time = 0;  // The first calibrated sample seeds the filter.
+#else
     qmi_last_imu_time = esp_timer_get_time();
+#endif
     imu_initialized = true;
     ESP_LOGI(TAG, "QMI8658C initialized at 0x%02X", imu_i2c_addr);
 }
 
 // ---------------------- 读取数据 ----------------------
 float d_time = 0.0f;
-long last_time = 0;
+int64_t last_time = 0;
 
 void imu_read_once() {
     if (!imu_initialized || !dev_handle) {
@@ -294,8 +308,14 @@ void imu_read_once() {
     // gyro_y -= gyro_bias[1];
     // gyro_z -= gyro_bias[2];
 
-    long current_time = esp_timer_get_time();
-    qmi_d_imu_time = (current_time - qmi_last_imu_time) * 0.000001;
+    const int64_t current_time = esp_timer_get_time();
+    const int64_t elapsed_us = current_time - qmi_last_imu_time;
+#if defined(CONFIG_BOARD_TYPE_HOVER)
+    const bool reseed = qmi_last_imu_time == 0 || elapsed_us > kImuMaxGapUs;
+#else
+    constexpr bool reseed = false;
+#endif
+    qmi_d_imu_time = reseed ? 0.0 : elapsed_us * 0.000001;
     d_time = (float)qmi_d_imu_time;
     last_time = current_time;
 
@@ -306,17 +326,28 @@ void imu_read_once() {
                     cos((q_head + 90.0) / 180.0 * PI) * accel_z) /
                    accel_x) *
               57.2958f;
-    roll = atan((sin((q_head + 90.0) / 180.0 * PI) * accel_z +
+    const float acc_roll = atan((sin((q_head + 90.0) / 180.0 * PI) * accel_z +
                  cos((q_head + 90.0) / 180.0 * PI) * accel_y) /
                 accel_x) *
            57.2958f;
 
-    dq = 0.6f * dq + 0.4f * pit_gyro;
-    gyro_yaw = 0.5f * gyro_yaw + 0.5f * gyro_y;
-
-    float pit_freq = 1.0f / (fabsf(pit_gyro) + 200.0f);
-    if (fabsf(pit_acc) < 100.0f && fabsf(pit_gyro) < 1000.0f) {
-        pitch = pit_freq * pit_acc + (1.0f - pit_freq) * (pitch + pit_gyro * (float)qmi_d_imu_time);
+#if defined(CONFIG_BOARD_TYPE_HOVER)
+    if (!std::isfinite(pit_acc) || !std::isfinite(acc_roll) || !std::isfinite(pit_gyro)) {
+        return;
+    }
+#endif
+    roll = acc_roll;
+    if (reseed) {
+        pitch = pit_acc;
+        dq = pit_gyro;
+        gyro_yaw = gyro_y;
+    } else {
+        dq = 0.6f * dq + 0.4f * pit_gyro;
+        gyro_yaw = 0.5f * gyro_yaw + 0.5f * gyro_y;
+        const float pit_freq = 1.0f / (fabsf(pit_gyro) + 200.0f);
+        if (fabsf(pit_acc) < 100.0f && fabsf(pit_gyro) < 1000.0f) {
+            pitch = pit_freq * pit_acc + (1.0f - pit_freq) * (pitch + pit_gyro * (float)qmi_d_imu_time);
+        }
     }
     pit_g = pit_g + pit_gyro * (float)qmi_d_imu_time;
     qmi_last_imu_time = current_time;
@@ -332,6 +363,12 @@ void imu_read_once() {
     if (isIMUInit) {  // bias 校准完成后才开始积分，校准窗口内 yaw 保持 0
         yaw = yaw - gyro_yaw_comp * (float)qmi_d_imu_time;
     }
+#if defined(CONFIG_BOARD_TYPE_HOVER)
+    portENTER_CRITICAL(&attitude_mux);
+    attitude = {current_time, reseed ? current_time : attitude.continuous_since_us,
+                pitch, roll, yaw, dq, imu_yaw_rate_dps()};
+    portEXIT_CRITICAL(&attitude_mux);
+#endif
 }
 
 // ---------------------- 清理 ----------------------
@@ -346,6 +383,11 @@ void imu_deinit() {
         bus_handle = nullptr;
     }
     imu_initialized = false;
+#if defined(CONFIG_BOARD_TYPE_HOVER)
+    portENTER_CRITICAL(&attitude_mux);
+    attitude = {};
+    portEXIT_CRITICAL(&attitude_mux);
+#endif
     isIMUInit = 0;
     qmi_countInit = 0;
     ESP_LOGI(TAG, "IMU deinitialized");
